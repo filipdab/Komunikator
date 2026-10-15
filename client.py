@@ -4,11 +4,14 @@ Uruchomienie:  python client.py
 """
 
 import json
+import math
 import os
 import queue
+import re
 import socket
 import threading
 import time
+import webbrowser
 
 import voice
 from protocol import DEFAULT_PORT, LineReader, encode
@@ -19,7 +22,34 @@ try:
 except ImportError:  # pozwala używać ChatConnection bez tkintera (np. w testach)
     tk = None
 
-APP_VERSION = "0.3"
+APP_VERSION = "0.4"
+APP_AUTHOR = "Filip Dąbrowski"
+APP_EMAIL = "filip@dabrowski.in"
+APP_WEBSITE = "https://www.dabrowski.in"
+
+EMOJI = (
+    "😀 😃 😄 😁 😆 😅 😂 🤣 😊 🙂 😉 😍 😘 😎 🤓 🤔 "
+    "😐 😏 😴 😮 😢 😭 😡 🤯 😱 🥳 🙃 😇 🤗 🤫 🙄 😬 "
+    "👍 👎 👏 🙌 🙏 💪 👋 ✌️ 👌 🤝 ❤️ 💔 🔥 ⭐ 🎉 🎂 "
+    "☕ 🍺 🍕 ⚽ 🎮 🎵 💻 📱 ✅ ❌ ❓ ❗ 💯 👀 🚀 🤖"
+).split()
+
+# http(s)://… albo www.… ; końcowa interpunkcja nie należy do linku
+URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"]+[^\s<>\".,;:!?)\]'”]")
+
+
+def split_links(text):
+    """Dzieli tekst na kawałki: [(fragment, url albo None), …]."""
+    parts, pos = [], 0
+    for m in URL_RE.finditer(text):
+        if m.start() > pos:
+            parts.append((text[pos:m.start()], None))
+        url = m.group(0)
+        parts.append((url, url if "://" in url else "http://" + url))
+        pos = m.end()
+    if pos < len(text):
+        parts.append((text[pos:], None))
+    return parts
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".komunikator.json")
 
 
@@ -165,6 +195,7 @@ class ChatApp:
         self.port_entry.pack(side=tk.LEFT, padx=(2, 10))
         self.connect_btn = ttk.Button(top, text="Połącz", width=10, command=self.toggle_connection)
         self.connect_btn.pack(side=tk.LEFT)
+        ttk.Button(top, text="O programie", command=self.show_about).pack(side=tk.RIGHT)
         for entry in (self.nick_entry, self.host_entry, self.port_entry):
             entry.bind("<Return>", lambda e: self.toggle_connection())
 
@@ -177,6 +208,10 @@ class ChatApp:
         self.input.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.input.bind("<Return>", self.on_enter)
         self.input.bind("<KeyRelease>", self.on_key)
+        self.emoji_btn = tk.Button(bottom, text="😊", font=("TkDefaultFont", 16), width=2,
+                                   relief=tk.FLAT, command=self.show_emoji_picker)
+        self.emoji_btn.pack(side=tk.LEFT, padx=(6, 0), fill=tk.Y)
+        self.emoji_popup = None
         self.send_btn = ttk.Button(bottom, text="Wyślij", width=10, command=self.send)
         self.send_btn.pack(side=tk.LEFT, padx=(6, 0), fill=tk.Y)
 
@@ -202,6 +237,11 @@ class ChatApp:
         self.voice_btn.pack(fill=tk.X, pady=(4, 0))
         self.mute_btn = ttk.Button(voice_box, text="Wycisz mikrofon", command=self.toggle_mute)
         self.mute_btn.pack(fill=tk.X, pady=(2, 0))
+        mic_row = ttk.Frame(voice_box)
+        mic_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(mic_row, text="Mikrofon:").pack(side=tk.LEFT)
+        self.mic_meter = ttk.Progressbar(mic_row, maximum=100, length=80)
+        self.mic_meter.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
         ttk.Label(side, text="Użytkownicy").pack(anchor=tk.W)
         self.users = tk.Listbox(side, width=18, height=5, bg="white", fg="black", relief=tk.SOLID, borderwidth=1)
@@ -215,6 +255,11 @@ class ChatApp:
         self.chat.tag_config("nick", foreground="#1a5fb4", font=("TkDefaultFont", 12, "bold"))
         self.chat.tag_config("me", foreground="#26a269", font=("TkDefaultFont", 12, "bold"))
         self.chat.tag_config("system", foreground="#888888", font=("TkDefaultFont", 11, "italic"))
+        self.chat.tag_config("link", foreground="#1a5fb4", underline=True)
+        self.chat.tag_bind("link", "<Enter>", lambda e: self.chat.config(cursor="hand2"))
+        self.chat.tag_bind("link", "<Leave>", lambda e: self.chat.config(cursor=""))
+        self.chat.tag_bind("link", "<Button-1>", self.open_link)
+        self.link_urls = {}  # nazwa znacznika -> adres
 
         self.set_connected_ui(False)
         self.nick_entry.focus_set()
@@ -264,6 +309,7 @@ class ChatApp:
         self.input.config(state=tk.NORMAL if connected else tk.DISABLED,
                           bg="white" if connected else "#f0f0f0")
         self.send_btn.config(state=tk.NORMAL if connected else tk.DISABLED)
+        self.emoji_btn.config(state=tk.NORMAL if connected else tk.DISABLED)
         self.voice_btn.config(state=tk.NORMAL if connected else tk.DISABLED)
         self.update_voice_buttons()
         if connected:
@@ -411,6 +457,7 @@ class ChatApp:
             return
         self.add_system("Dołączyłeś do rozmowy głosowej. Najlepiej używaj słuchawek, żeby uniknąć echa.")
         self.update_voice_buttons()
+        self.root.after(100, self.update_mic_meter, engine, time.time(), False)
 
     def stop_voice(self):
         engine, self.voice = self.voice, None
@@ -424,6 +471,22 @@ class ChatApp:
             except OSError:
                 pass
         self.update_voice_buttons()
+
+    MIC_SILENT_WARN = 4.0  # po ilu sekundach samej ciszy z mikrofonu pokazać podpowiedź
+
+    def update_mic_meter(self, engine, started, warned):
+        if self.voice is not engine:
+            self.mic_meter["value"] = 0
+            return
+        # skala logarytmiczna: cichy głos też powinien poruszyć wskaźnikiem
+        level = engine.mic_level
+        self.mic_meter["value"] = 0 if level < 30 else min(100, int(100 * math.log10(level / 30) / math.log10(32767 / 30)))
+        if not warned and engine.mic_max == 0 and time.time() - started > self.MIC_SILENT_WARN:
+            warned = True
+            self.add_system("Mikrofon nic nie nagrywa (sama cisza). Na macOS sprawdź Ustawienia systemowe → "
+                            "Prywatność i ochrona → Mikrofon i zezwól Terminalowi, a potem uruchom go ponownie. "
+                            "Sprawdź też, który mikrofon jest wybrany w Ustawieniach → Dźwięk → Wejście.")
+        self.root.after(100, self.update_mic_meter, engine, started, warned)
 
     def toggle_mute(self):
         if self.voice:
@@ -464,7 +527,73 @@ class ChatApp:
 
     def add_message(self, nick, text, ts=None):
         tag = "me" if nick == self.my_nick else "nick"
-        self._append([(f"[{self._clock(ts)}] ", "time"), (f"{nick}: ", tag), (text, None)])
+        parts = [(f"[{self._clock(ts)}] ", "time"), (f"{nick}: ", tag)]
+        for chunk, url in split_links(text):
+            if url:
+                name = f"link{len(self.link_urls)}"
+                self.link_urls[name] = url
+                parts.append((chunk, ("link", name)))
+            else:
+                parts.append((chunk, None))
+        self._append(parts)
+
+    def open_link(self, event):
+        for name in self.chat.tag_names(f"@{event.x},{event.y}"):
+            if name in self.link_urls:
+                webbrowser.open(self.link_urls[name])
+                return "break"
+
+    # --- emotki ---
+
+    def show_emoji_picker(self):
+        if self.emoji_popup is not None and self.emoji_popup.winfo_exists():
+            self.emoji_popup.destroy()
+            return
+        popup = tk.Toplevel(self.root)
+        popup.title("Emotki")
+        popup.transient(self.root)
+        popup.resizable(False, False)
+        grid = ttk.Frame(popup, padding=4)
+        grid.pack()
+        for i, emoji in enumerate(EMOJI):
+            tk.Button(grid, text=emoji, font=("TkDefaultFont", 18), width=2, relief=tk.FLAT,
+                      command=lambda e=emoji: self.insert_emoji(e)).grid(row=i // 8, column=i % 8)
+        popup.update_idletasks()
+        # nad przyciskiem emotek, przy prawej krawędzi okna
+        x = self.emoji_btn.winfo_rootx() + self.emoji_btn.winfo_width() - popup.winfo_reqwidth()
+        y = self.emoji_btn.winfo_rooty() - popup.winfo_reqheight() - 30
+        popup.geometry(f"+{max(0, x)}+{max(0, y)}")
+        popup.bind("<Escape>", lambda e: popup.destroy())
+        self.emoji_popup = popup
+
+    def insert_emoji(self, emoji):
+        if str(self.input["state"]) != tk.NORMAL:
+            return
+        self.input.insert(tk.INSERT, emoji)
+        self.input.focus_set()
+        if self.emoji_popup is not None:
+            self.emoji_popup.destroy()
+            self.emoji_popup = None
+
+    # --- o programie ---
+
+    def show_about(self):
+        win = tk.Toplevel(self.root)
+        win.title("O programie")
+        win.transient(self.root)
+        win.resizable(False, False)
+        box = ttk.Frame(win, padding=20)
+        box.pack()
+        ttk.Label(box, text="Komunikator", font=("TkDefaultFont", 18, "bold")).pack()
+        ttk.Label(box, text=f"Wersja {APP_VERSION}").pack(pady=(2, 12))
+        ttk.Label(box, text=f"Autor: {APP_AUTHOR}").pack()
+        for text, url in ((APP_EMAIL, f"mailto:{APP_EMAIL}"), (APP_WEBSITE.split("//")[1], APP_WEBSITE)):
+            link = tk.Label(box, text=text, fg="#1a5fb4", cursor="hand2",
+                            font=("TkDefaultFont", 12, "underline"))
+            link.pack()
+            link.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+        ttk.Button(box, text="Zamknij", command=win.destroy).pack(pady=(14, 0))
+        win.bind("<Escape>", lambda e: win.destroy())
 
     def add_system(self, text, ts=None):
         self._append([(f"[{self._clock(ts)}] ", "time"), (f"* {text}", "system")])

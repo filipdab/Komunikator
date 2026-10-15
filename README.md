@@ -1,4 +1,4 @@
-# Komunikator 0.3
+# Komunikator 0.4
 
 Prosty graficzny komunikator tekstowy w Pythonie. Jeden serwer, dowolnie wielu klientów;
 każda wiadomość trafia do wszystkich podłączonych osób (jeden wspólny pokój).
@@ -78,4 +78,12 @@ Uwaga: w tej wersji ruch nie jest szyfrowany ani uwierzytelniany – nie wysyła
 - większe, wielowierszowe pole wpisywania, zawsze widoczne (0.2)
 - sygnalizacja „… pisze…” pod oknem czatu (0.2)
 - rozmowa głosowa dla wielu osób z wyciszaniem mikrofonu (0.3)
+- wskaźnik poziomu mikrofonu i podpowiedź, gdy mikrofon daje ciszę (0.4)
+- wybór emotek przyciskiem 😊 obok pola wpisywania (0.4)
+- klikalne linki w oknie czatu (http://…, https://…, www.…) (0.4)
+- okno „O programie” z wersją i danymi autora (0.4)
 - poprawne rozłączenie po zamknięciu okna lub zatrzymaniu serwera
+
+## Autor
+
+Filip Dąbrowski · [filip@dabrowski.in](mailto:filip@dabrowski.in) · [www.dabrowski.in](https://www.dabrowski.in)
