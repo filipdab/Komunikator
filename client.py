@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 
+import voice
 from protocol import DEFAULT_PORT, LineReader, encode
 
 try:
@@ -18,7 +19,7 @@ try:
 except ImportError:  # pozwala używać ChatConnection bez tkintera (np. w testach)
     tk = None
 
-APP_VERSION = "0.2"
+APP_VERSION = "0.3"
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".komunikator.json")
 
 
@@ -56,28 +57,36 @@ class ChatConnection:
 
     Każde zdarzenie to słownik z protokołu, a dodatkowo
     {"type": "disconnected", "text": ...} po zerwaniu połączenia.
+    Ramki dźwięku nie przechodzą przez kolejkę: trafiają od razu do `on_audio(nick, data)`.
     """
 
     def __init__(self):
         self.sock = None
         self.events = queue.Queue()
         self.connected = False
+        self.on_audio = None
+        self.send_lock = threading.Lock()  # wysyłają wątek okna i wątek dźwięku
 
     def connect(self, host, port, nick, timeout=5):
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(None)
         self.sock.sendall(encode({"type": "join", "nick": nick}))
         self.connected = True
-        threading.Thread(target=self._receive_loop, daemon=True).start()
+        threading.Thread(target=self._receive_loop, args=(self.sock,), daemon=True).start()
 
-    def _receive_loop(self):
-        reader = LineReader(self.sock)
+    def _receive_loop(self, sock):
+        reader = LineReader(sock)
         reason = "Połączenie z serwerem zostało zamknięte."
         try:
             while True:
                 msg = reader.read()
                 if msg is None:
                     break
+                if msg.get("type") == "audio":
+                    handler = self.on_audio
+                    if handler:
+                        handler(msg.get("nick"), msg.get("data", ""))
+                    continue
                 if msg.get("type") == "error":
                     reason = msg.get("text", reason)
                 self.events.put(msg)
@@ -86,26 +95,35 @@ class ChatConnection:
         self.connected = False
         self.events.put({"type": "disconnected", "text": reason})
 
+    def send(self, obj):
+        """Wysyła wiadomość protokołu. Rzuca OSError, gdy połączenie padło."""
+        sock = self.sock
+        if not self.connected or sock is None:
+            raise OSError("Brak połączenia")
+        with self.send_lock:
+            sock.sendall(encode(obj))
+
     def send_message(self, text):
-        if self.connected:
-            self.sock.sendall(encode({"type": "msg", "text": text}))
+        self.send({"type": "msg", "text": text})
 
     def send_typing(self, active):
-        if self.connected:
-            try:
-                self.sock.sendall(encode({"type": "typing", "active": bool(active)}))
-            except OSError:
-                pass
+        try:
+            self.send({"type": "typing", "active": bool(active)})
+        except OSError:
+            pass
+
+    def send_audio(self, data):
+        self.send({"type": "audio", "data": data})
 
     def close(self):
         self.connected = False
-        if self.sock:
+        sock, self.sock = self.sock, None
+        if sock:
             try:
-                self.sock.shutdown(socket.SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            self.sock.close()
-            self.sock = None
+            sock.close()
 
 
 class ChatApp:
@@ -122,6 +140,7 @@ class ChatApp:
         self.typing_users = {}        # nick -> czas ostatniego sygnału
         self.last_typing_sent = 0.0
         self.typing_idle_job = None
+        self.voice = None             # VoiceEngine, gdy jestem w rozmowie głosowej
         settings = load_settings()
 
         self.root.title(f"Komunikator {APP_VERSION}")
@@ -171,6 +190,19 @@ class ChatApp:
         middle.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         side = ttk.Frame(middle, padding=(6, 0, 0, 0))
         side.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Rozmowa głosowa (dół panelu bocznego)
+        voice_box = ttk.Frame(side, padding=(0, 8, 0, 0))
+        voice_box.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(voice_box, text="Rozmowa głosowa").pack(anchor=tk.W)
+        self.voice_list = tk.Listbox(voice_box, width=18, height=4, bg="white", fg="black",
+                                     relief=tk.SOLID, borderwidth=1)
+        self.voice_list.pack(fill=tk.X)
+        self.voice_btn = ttk.Button(voice_box, text="Dołącz do rozmowy", command=self.toggle_voice)
+        self.voice_btn.pack(fill=tk.X, pady=(4, 0))
+        self.mute_btn = ttk.Button(voice_box, text="Wycisz mikrofon", command=self.toggle_mute)
+        self.mute_btn.pack(fill=tk.X, pady=(2, 0))
+
         ttk.Label(side, text="Użytkownicy").pack(anchor=tk.W)
         self.users = tk.Listbox(side, width=18, height=5, bg="white", fg="black", relief=tk.SOLID, borderwidth=1)
         self.users.pack(fill=tk.Y, expand=True)
@@ -220,6 +252,7 @@ class ChatApp:
         self.add_system(f"Łączenie z {host}:{port}...")
 
     def disconnect(self):
+        self.stop_voice()
         if self.conn:
             self.conn.close()
 
@@ -231,10 +264,13 @@ class ChatApp:
         self.input.config(state=tk.NORMAL if connected else tk.DISABLED,
                           bg="white" if connected else "#f0f0f0")
         self.send_btn.config(state=tk.NORMAL if connected else tk.DISABLED)
+        self.voice_btn.config(state=tk.NORMAL if connected else tk.DISABLED)
+        self.update_voice_buttons()
         if connected:
             self.input.focus_set()
         else:
             self.users.delete(0, tk.END)
+            self.voice_list.delete(0, tk.END)
             self.typing_users.clear()
             self.update_typing_label()
 
@@ -282,14 +318,19 @@ class ChatApp:
     # --- zdarzenia z serwera ---
 
     def poll_events(self):
-        if self.conn:
-            while True:
+        try:
+            # Zdarzenie „disconnected” zeruje self.conn, więc czytamy z kopii,
+            # a po zmianie połączenia przerywamy pętlę.
+            conn = self.conn
+            while conn is not None and self.conn is conn:
                 try:
-                    event = self.conn.events.get_nowait()
+                    event = conn.events.get_nowait()
                 except queue.Empty:
                     break
                 self.handle_event(event)
-        self.root.after(100, self.poll_events)
+        finally:
+            # Odbiór zdarzeń musi trwać nawet po błędzie, inaczej okno przestaje reagować.
+            self.root.after(100, self.poll_events)
 
     def handle_event(self, event):
         kind = event.get("type")
@@ -320,10 +361,80 @@ class ChatApp:
                 if nick not in names:
                     del self.typing_users[nick]
             self.update_typing_label()
+        elif kind == "voice_users":
+            names = event.get("users", [])
+            self.voice_list.delete(0, tk.END)
+            for name in names:
+                self.voice_list.insert(tk.END, name)
+            if self.voice:
+                for nick in list(self.voice.jitter.buffers):
+                    if nick not in names:
+                        self.voice.jitter.remove(nick)
         elif kind == "disconnected":
+            self.stop_voice()
             self.add_system(event.get("text", "Rozłączono."))
             self.conn = None
             self.set_connected_ui(False)
+
+    # --- rozmowa głosowa ---
+
+    def toggle_voice(self):
+        if self.voice:
+            self.stop_voice()
+            self.add_system("Opuściłeś rozmowę głosową.")
+        else:
+            self.start_voice()
+
+    def start_voice(self):
+        if not (self.conn and self.conn.connected):
+            return
+        if not voice.available():
+            messagebox.showerror("Brak obsługi dźwięku",
+                                 "Rozmowy głosowe wymagają biblioteki sounddevice.\n"
+                                 "Zainstaluj ją poleceniem:\n\n  python3 -m pip install sounddevice\n\n"
+                                 f"Szczegóły: {voice.IMPORT_ERROR}")
+            return
+        conn = self.conn
+        engine = voice.VoiceEngine(conn.send_audio)
+        try:
+            engine.start()
+        except Exception as e:
+            engine.stop()
+            messagebox.showerror("Błąd dźwięku", f"Nie udało się otworzyć mikrofonu lub głośników.\n{e}")
+            return
+        self.voice = engine
+        conn.on_audio = engine.receive
+        try:
+            conn.send({"type": "voice_join"})
+        except OSError:
+            self.stop_voice()
+            return
+        self.add_system("Dołączyłeś do rozmowy głosowej. Najlepiej używaj słuchawek, żeby uniknąć echa.")
+        self.update_voice_buttons()
+
+    def stop_voice(self):
+        engine, self.voice = self.voice, None
+        if engine is None:
+            return
+        engine.stop()
+        if self.conn:
+            self.conn.on_audio = None
+            try:
+                self.conn.send({"type": "voice_leave"})
+            except OSError:
+                pass
+        self.update_voice_buttons()
+
+    def toggle_mute(self):
+        if self.voice:
+            self.voice.muted = not self.voice.muted
+            self.update_voice_buttons()
+
+    def update_voice_buttons(self):
+        in_voice = self.voice is not None
+        self.voice_btn.config(text="Opuść rozmowę" if in_voice else "Dołącz do rozmowy")
+        self.mute_btn.config(state=tk.NORMAL if in_voice else tk.DISABLED,
+                             text="Włącz mikrofon" if in_voice and self.voice.muted else "Wycisz mikrofon")
 
     def expire_typing(self):
         now = time.time()

@@ -12,6 +12,7 @@ from protocol import DEFAULT_PORT, LineReader, encode
 
 MAX_NICK = 24
 MAX_TEXT = 2000
+MAX_AUDIO = 4000  # maks. długość ramki dźwięku w base64 (20 ms PCM to ok. 860 znaków)
 
 
 class ChatServer:
@@ -19,6 +20,8 @@ class ChatServer:
         self.host = host
         self.port = port
         self.clients = {}  # gniazdo -> nick
+        self.send_locks = {}  # gniazdo -> blokada, żeby wątki nie przeplatały danych w jednym gnieździe
+        self.voice = set()  # gniazda osób w rozmowie głosowej
         self.lock = threading.Lock()
         self.sock = None
         self.running = False
@@ -58,20 +61,56 @@ class ChatServer:
                 pass
 
     def send(self, conn, obj):
+        self._send_raw(conn, encode(obj))
+
+    def _send_raw(self, conn, data):
+        with self.lock:
+            lock = self.send_locks.get(conn)
         try:
-            conn.sendall(encode(obj))
+            if lock is None:
+                conn.sendall(data)
+            else:
+                with lock:
+                    conn.sendall(data)
         except OSError:
             pass
 
-    def broadcast(self, obj, skip=None):
+    def broadcast(self, obj, skip=None, only=None):
         data = encode(obj)
         with self.lock:
-            targets = [c for c in self.clients if c is not skip]
+            pool = self.clients if only is None else only
+            targets = [c for c in pool if c is not skip]
         for conn in targets:
-            try:
-                conn.sendall(data)
-            except OSError:
-                pass
+            self._send_raw(conn, data)
+
+    def voice_users(self):
+        with self.lock:
+            return sorted((self.clients[c] for c in self.voice if c in self.clients), key=str.lower)
+
+    def broadcast_voice_users(self):
+        self.broadcast({"type": "voice_users", "users": self.voice_users()})
+
+    def handle_voice(self, conn, nick, msg):
+        kind = msg.get("type")
+        if kind == "voice_join":
+            with self.lock:
+                self.voice.add(conn)
+            self.log(f"{nick} dołączył do rozmowy głosowej")
+            self.broadcast_voice_users()
+        elif kind == "voice_leave":
+            with self.lock:
+                was_in = conn in self.voice
+                self.voice.discard(conn)
+            if was_in:
+                self.log(f"{nick} opuścił rozmowę głosową")
+                self.broadcast_voice_users()
+        elif kind == "audio":
+            data = msg.get("data")
+            with self.lock:
+                in_voice = conn in self.voice
+                listeners = set(self.voice)
+            if in_voice and isinstance(data, str) and len(data) <= MAX_AUDIO:
+                self.broadcast({"type": "audio", "nick": nick, "data": data}, skip=conn, only=listeners)
 
     def broadcast_users(self):
         with self.lock:
@@ -94,6 +133,7 @@ class ChatServer:
                 taken = nick.lower() in (n.lower() for n in self.clients.values())
                 if not taken:
                     self.clients[conn] = nick
+                    self.send_locks[conn] = threading.Lock()
             if taken:
                 self.send(conn, {"type": "error", "text": f"Nick „{nick}” jest już zajęty."})
                 nick = None
@@ -103,12 +143,15 @@ class ChatServer:
             self.send(conn, {"type": "welcome", "nick": nick})
             self.broadcast({"type": "system", "text": f"{nick} dołączył do czatu.", "time": time.time()})
             self.broadcast_users()
+            self.send(conn, {"type": "voice_users", "users": self.voice_users()})
 
             while True:
                 msg = reader.read()
                 if msg is None:
                     break
-                if msg.get("type") == "typing":
+                if msg.get("type") in ("voice_join", "voice_leave", "audio"):
+                    self.handle_voice(conn, nick, msg)
+                elif msg.get("type") == "typing":
                     self.broadcast({"type": "typing", "nick": nick, "active": bool(msg.get("active"))}, skip=conn)
                 elif msg.get("type") == "msg":
                     text = str(msg.get("text", "")).strip()[:MAX_TEXT]
@@ -119,11 +162,16 @@ class ChatServer:
         finally:
             with self.lock:
                 self.clients.pop(conn, None)
+                self.send_locks.pop(conn, None)
+                was_in_voice = conn in self.voice
+                self.voice.discard(conn)
             conn.close()
             if nick:
                 self.log(f"{nick} wyszedł")
                 self.broadcast({"type": "system", "text": f"{nick} opuścił czat.", "time": time.time()})
                 self.broadcast_users()
+                if was_in_voice:
+                    self.broadcast_voice_users()
 
 
 def main():
