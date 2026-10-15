@@ -1,4 +1,4 @@
-# Komunikator 0.1
+# Komunikator 0.2
 
 Prosty graficzny komunikator tekstowy w Pythonie. Jeden serwer, dowolnie wielu klientów;
 każda wiadomość trafia do wszystkich podłączonych osób (jeden wspólny pokój).
@@ -28,7 +28,11 @@ Wymagania: Python 3.8+ (tylko biblioteka standardowa). Klient potrzebuje modułu
    python client.py
    ```
 
-   Wpisz nick, adres serwera i port, kliknij **Połącz**. Wiadomość wysyłasz Enterem lub przyciskiem **Wyślij**.
+   Wpisz nick, adres serwera i port, kliknij **Połącz**. Wiadomość wysyłasz Enterem lub przyciskiem **Wyślij**,
+   a Shift+Enter dodaje nową linię. Nick, adres i port są zapamiętywane w pliku `~/.komunikator.json`.
+
+   Na macOS uruchamiaj klienta Pythonem z python.org albo z Homebrew (`brew install python-tk`).
+   Systemowy `/usr/bin/python3` ma stary Tk 8.5, który wyświetla puste okno.
 
 ## Łączenie przez internet
 
@@ -37,11 +41,14 @@ Wymagania: Python 3.8+ (tylko biblioteka standardowa). Klient potrzebuje modułu
   i podaj klientom publiczny adres IP. Zezwól też na ten port w zaporze systemu.
 - Alternatywa bez konfiguracji routera: VPN typu Tailscale/ZeroTier i adres z tej sieci.
 
-Uwaga: w wersji 0.1 ruch nie jest szyfrowany ani uwierzytelniany – nie wysyłaj nim haseł.
+Uwaga: w tej wersji ruch nie jest szyfrowany ani uwierzytelniany – nie wysyłaj nim haseł.
 
-## Co działa w 0.1
+## Co działa
 
 - wiadomości do wszystkich z godziną i nickiem (pełne UTF-8, polskie znaki, emoji)
 - lista osób online, komunikaty o dołączeniu i wyjściu
 - unikalne nicki (bez względu na wielkość liter)
+- zapamiętywanie nicku, adresu i portu serwera (0.2)
+- większe, wielowierszowe pole wpisywania, zawsze widoczne (0.2)
+- sygnalizacja „… pisze…” pod oknem czatu (0.2)
 - poprawne rozłączenie po zamknięciu okna lub zatrzymaniu serwera
