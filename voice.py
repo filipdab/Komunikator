@@ -30,6 +30,13 @@ def available():
     return sd is not None
 
 
+def peak(frame):
+    """Najgłośniejsza próbka w ramce (0–32767)."""
+    samples = array.array("h")
+    samples.frombytes(frame)
+    return max((abs(v) for v in samples), default=0)
+
+
 def mix(frames):
     """Sumuje ramki PCM 16-bit z obcięciem do zakresu próbek."""
     if not frames:
@@ -100,6 +107,8 @@ class VoiceEngine:
         self.jitter = JitterBuffer()
         self.outgoing = queue.Queue(maxsize=50)
         self.muted = False
+        self.mic_level = 0       # poziom ostatniej ramki z mikrofonu
+        self.mic_max = 0         # najwyższy poziom od dołączenia (0 = mikrofon daje samą ciszę)
         self.stream = None
         self.running = False
 
@@ -136,9 +145,12 @@ class VoiceEngine:
         self.jitter.push(nick, frame)
 
     def _callback(self, indata, outdata, frames, time_info, status):
+        frame = bytes(indata)
+        self.mic_level = peak(frame)
+        self.mic_max = max(self.mic_max, self.mic_level)
         if not self.muted and frames == FRAME:
             try:
-                self.outgoing.put_nowait(bytes(indata))
+                self.outgoing.put_nowait(frame)
             except queue.Full:
                 pass  # sieć nie nadąża: gubimy ramkę zamiast opóźniać rozmowę
         mixed = self.jitter.pop_mixed()

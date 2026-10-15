@@ -4,6 +4,7 @@ Uruchomienie:  python client.py
 """
 
 import json
+import math
 import os
 import queue
 import socket
@@ -202,6 +203,11 @@ class ChatApp:
         self.voice_btn.pack(fill=tk.X, pady=(4, 0))
         self.mute_btn = ttk.Button(voice_box, text="Wycisz mikrofon", command=self.toggle_mute)
         self.mute_btn.pack(fill=tk.X, pady=(2, 0))
+        mic_row = ttk.Frame(voice_box)
+        mic_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(mic_row, text="Mikrofon:").pack(side=tk.LEFT)
+        self.mic_meter = ttk.Progressbar(mic_row, maximum=100, length=80)
+        self.mic_meter.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
         ttk.Label(side, text="Użytkownicy").pack(anchor=tk.W)
         self.users = tk.Listbox(side, width=18, height=5, bg="white", fg="black", relief=tk.SOLID, borderwidth=1)
@@ -411,6 +417,7 @@ class ChatApp:
             return
         self.add_system("Dołączyłeś do rozmowy głosowej. Najlepiej używaj słuchawek, żeby uniknąć echa.")
         self.update_voice_buttons()
+        self.root.after(100, self.update_mic_meter, engine, time.time(), False)
 
     def stop_voice(self):
         engine, self.voice = self.voice, None
@@ -424,6 +431,22 @@ class ChatApp:
             except OSError:
                 pass
         self.update_voice_buttons()
+
+    MIC_SILENT_WARN = 4.0  # po ilu sekundach samej ciszy z mikrofonu pokazać podpowiedź
+
+    def update_mic_meter(self, engine, started, warned):
+        if self.voice is not engine:
+            self.mic_meter["value"] = 0
+            return
+        # skala logarytmiczna: cichy głos też powinien poruszyć wskaźnikiem
+        level = engine.mic_level
+        self.mic_meter["value"] = 0 if level < 30 else min(100, int(100 * math.log10(level / 30) / math.log10(32767 / 30)))
+        if not warned and engine.mic_max == 0 and time.time() - started > self.MIC_SILENT_WARN:
+            warned = True
+            self.add_system("Mikrofon nic nie nagrywa (sama cisza). Na macOS sprawdź Ustawienia systemowe → "
+                            "Prywatność i ochrona → Mikrofon i zezwól Terminalowi, a potem uruchom go ponownie. "
+                            "Sprawdź też, który mikrofon jest wybrany w Ustawieniach → Dźwięk → Wejście.")
+        self.root.after(100, self.update_mic_meter, engine, started, warned)
 
     def toggle_mute(self):
         if self.voice:
