@@ -63,10 +63,10 @@ class ChatServer:
         except OSError:
             pass
 
-    def broadcast(self, obj):
+    def broadcast(self, obj, skip=None):
         data = encode(obj)
         with self.lock:
-            targets = list(self.clients)
+            targets = [c for c in self.clients if c is not skip]
         for conn in targets:
             try:
                 conn.sendall(data)
@@ -108,7 +108,9 @@ class ChatServer:
                 msg = reader.read()
                 if msg is None:
                     break
-                if msg.get("type") == "msg":
+                if msg.get("type") == "typing":
+                    self.broadcast({"type": "typing", "nick": nick, "active": bool(msg.get("active"))}, skip=conn)
+                elif msg.get("type") == "msg":
                     text = str(msg.get("text", "")).strip()[:MAX_TEXT]
                     if text:
                         self.broadcast({"type": "msg", "nick": nick, "text": text, "time": time.time()})
