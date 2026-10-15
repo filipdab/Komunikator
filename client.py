@@ -282,14 +282,19 @@ class ChatApp:
     # --- zdarzenia z serwera ---
 
     def poll_events(self):
-        if self.conn:
-            while True:
+        try:
+            # Zdarzenie „disconnected” zeruje self.conn, więc czytamy z kopii,
+            # a po zmianie połączenia przerywamy pętlę.
+            conn = self.conn
+            while conn is not None and self.conn is conn:
                 try:
-                    event = self.conn.events.get_nowait()
+                    event = conn.events.get_nowait()
                 except queue.Empty:
                     break
                 self.handle_event(event)
-        self.root.after(100, self.poll_events)
+        finally:
+            # Odbiór zdarzeń musi trwać nawet po błędzie, inaczej okno przestaje reagować.
+            self.root.after(100, self.poll_events)
 
     def handle_event(self, event):
         kind = event.get("type")
