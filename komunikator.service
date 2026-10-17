@@ -1,0 +1,18 @@
+# Usługa systemd dla serwera komunikatora (np. na Raspberry Pi).
+# Popraw User i ścieżki, skopiuj do /etc/systemd/system/ i włącz: sudo systemctl enable --now komunikator
+# Bez HTTPS usuń z ExecStart opcje --cert i --key.
+
+[Unit]
+Description=Komunikator - serwer czatu
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=filip
+WorkingDirectory=/home/filip/Komunikator
+ExecStart=/usr/bin/python3 server.py --cert cert.pem --key key.pem
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

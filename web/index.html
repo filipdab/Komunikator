@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1a5fb4">
+<title>Komunikator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<section id="login" class="screen">
+  <form id="login-form" class="card">
+    <h1>Komunikator</h1>
+    <label for="nick">Twój nick</label>
+    <input id="nick" maxlength="24" autocomplete="nickname" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <button type="submit" id="connect-btn">Połącz</button>
+    <p id="login-status" class="muted" role="status"></p>
+    <button type="button" class="link about-btn">O programie</button>
+  </form>
+</section>
+
+<section id="chat" class="screen" hidden>
+  <header>
+    <h1>Komunikator</h1>
+    <span id="conn-status" class="muted" role="status"></span>
+    <button type="button" id="users-btn" class="ghost">Osoby (<span id="users-count">0</span>)</button>
+    <button type="button" class="ghost about-btn" aria-label="O programie">ⓘ</button>
+    <button type="button" id="disconnect-btn" class="ghost">Rozłącz</button>
+  </header>
+
+  <div id="main">
+    <div id="messages" aria-live="polite"></div>
+    <aside id="users-panel">
+      <h2>Na czacie</h2>
+      <ul id="users-list"></ul>
+      <h2>W rozmowie głosowej</h2>
+      <ul id="voice-list"></ul>
+    </aside>
+  </div>
+
+  <div id="typing" class="muted"></div>
+
+  <div id="voice-bar">
+    <button type="button" id="voice-btn" class="voice-join">📞 Dołącz do rozmowy</button>
+    <button type="button" id="mute-btn" hidden>🎤 Wycisz</button>
+    <span id="mic-meter" hidden aria-label="Poziom mikrofonu"><span id="mic-level"></span></span>
+    <span id="voice-count" class="muted"></span>
+  </div>
+
+  <div id="emoji-panel" hidden></div>
+
+  <form id="send-form">
+    <button type="button" id="emoji-btn" aria-label="Emotki">😊</button>
+    <textarea id="input" rows="2" placeholder="Wiadomość… (Enter wysyła, Shift+Enter nowa linia)"></textarea>
+    <button type="submit" id="send-btn">Wyślij</button>
+  </form>
+</section>
+
+<dialog id="about">
+  <h2>Komunikator</h2>
+  <p id="about-version" class="muted"></p>
+  <p id="about-author"></p>
+  <p><a id="about-email"></a></p>
+  <p><a id="about-web" target="_blank" rel="noopener"></a></p>
+  <form method="dialog"><button>Zamknij</button></form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

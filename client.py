@@ -22,7 +22,7 @@ try:
 except ImportError:  # pozwala używać ChatConnection bez tkintera (np. w testach)
     tk = None
 
-APP_VERSION = "0.4"
+APP_VERSION = "0.5"
 APP_AUTHOR = "Filip Dąbrowski"
 APP_EMAIL = "filip@dabrowski.in"
 APP_WEBSITE = "https://www.dabrowski.in"
