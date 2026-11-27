@@ -16,6 +16,10 @@
     <h1>Komunikator</h1>
     <label for="nick">Twój nick</label>
     <input id="nick" maxlength="24" autocomplete="nickname" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <label for="passphrase">Hasło pokoju</label>
+    <input id="passphrase" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label class="check"><input type="checkbox" id="remember"> Zapamiętaj na tym urządzeniu</label>
+    <p class="muted hint">🔒 Rozmowa jest szyfrowana end-to-end. Wszyscy wpisują to samo hasło; serwer go nie zna i nie może odczytać wiadomości ani głosu.</p>
     <button type="submit" id="connect-btn">Połącz</button>
     <p id="login-status" class="muted" role="status"></p>
     <button type="button" class="link about-btn">O programie</button>
@@ -68,6 +72,7 @@
   <form method="dialog"><button>Zamknij</button></form>
 </dialog>
 
+<script src="e2e.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

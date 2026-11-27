@@ -4,6 +4,9 @@ Obsługuje jednocześnie:
 - klientów okienkowych (client.py) przez TCP, domyślnie port 5050,
 - przeglądarki: strona czatu i WebSocket, domyślnie port 8080 (patrz webserver.py).
 
+Wiadomości i dźwięk są szyfrowane end-to-end przez klientów (patrz e2e.py): serwer przekazuje
+szyfrogram dalej i nie zna treści. Jawne zostają nicki, lista osób i sygnał „pisze…”.
+
 Uruchomienie:  python server.py [--host 0.0.0.0] [--port 5050] [--http-port 8080] [--cert plik --key plik]
 """
 
@@ -16,8 +19,9 @@ from protocol import DEFAULT_PORT, LineReader, encode
 
 DEFAULT_HTTP_PORT = 8080
 MAX_NICK = 24
-MAX_TEXT = 2000
-MAX_AUDIO = 4000  # maks. długość ramki dźwięku w base64 (20 ms PCM to ok. 860 znaków)
+E2E_PROTOCOL = 1  # wersja szyfrowania wymagana od klientów
+MAX_CIPHERTEXT = 12000  # maks. długość zaszyfrowanej wiadomości w base64 (2000 znaków tekstu to do ok. 10,7 tys.)
+MAX_AUDIO = 4000  # maks. długość zaszyfrowanej ramki dźwięku w base64 (20 ms PCM to ok. 900 znaków)
 
 
 class TcpPeer:
@@ -147,6 +151,10 @@ class ChatServer:
             hello = peer.read()
             if not hello or hello.get("type") != "join":
                 return
+            if hello.get("e2e") != E2E_PROTOCOL:
+                self.send(peer, {"type": "error", "text": "Ten serwer wymaga szyfrowania end-to-end. "
+                                                          "Zaktualizuj Komunikator do wersji 0.6."})
+                return
             nick = str(hello.get("nick", "")).strip()[:MAX_NICK]
             if not nick:
                 self.send(peer, {"type": "error", "text": "Nick nie może być pusty."})
@@ -176,9 +184,9 @@ class ChatServer:
                 elif msg.get("type") == "typing":
                     self.broadcast({"type": "typing", "nick": nick, "active": bool(msg.get("active"))}, skip=peer)
                 elif msg.get("type") == "msg":
-                    text = str(msg.get("text", "")).strip()[:MAX_TEXT]
-                    if text:
-                        self.broadcast({"type": "msg", "nick": nick, "text": text, "time": time.time()})
+                    data = msg.get("data")
+                    if isinstance(data, str) and 0 < len(data) <= MAX_CIPHERTEXT:
+                        self.broadcast({"type": "msg", "nick": nick, "data": data, "time": time.time()})
         except (OSError, ValueError):
             pass
         finally:

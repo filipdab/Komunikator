@@ -1,10 +1,13 @@
-# Komunikator 0.5
+# Komunikator 0.6
 
 Prosty graficzny komunikator tekstowy w Pythonie. Jeden serwer, dowolnie wielu klientów;
 każda wiadomość trafia do wszystkich podłączonych osób (jeden wspólny pokój).
+Wiadomości i rozmowa głosowa są szyfrowane end-to-end wspólnym hasłem pokoju (patrz niżej).
 
-Wymagania: Python 3.8+ (tylko biblioteka standardowa). Klient potrzebuje modułu `tkinter`
-(na Windows i macOS jest w standardowej instalacji; na Linuksie: `sudo apt install python3-tk`).
+Wymagania: Python 3.8+. Serwer używa tylko biblioteki standardowej. Klient potrzebuje modułu `tkinter`
+(na Windows i macOS jest w standardowej instalacji; na Linuksie: `sudo apt install python3-tk`)
+i biblioteki `cryptography`: `python3 -m pip install cryptography`
+(na Raspberry Pi OS, Debianie i Ubuntu: `sudo apt install python3-cryptography`).
 
 ## Pliki
 
@@ -15,6 +18,7 @@ Wymagania: Python 3.8+ (tylko biblioteka standardowa). Klient potrzebuje modułu
 - `client.py` – okno czatu (tkinter)
 - `voice.py` – rozmowa głosowa (mikrofon, miksowanie, odtwarzanie)
 - `protocol.py` – wspólny format wiadomości (JSON, jedna wiadomość na linię)
+- `e2e.py` – szyfrowanie end-to-end (klient); `web/e2e.js` – to samo w przeglądarce
 
 ## Uruchomienie
 
@@ -27,28 +31,30 @@ Wymagania: Python 3.8+ (tylko biblioteka standardowa). Klient potrzebuje modułu
    Domyślnie nasłuchuje na wszystkich interfejsach: port 5050 dla programu `client.py`
    i port 8080 dla przeglądarek (`--port` i `--http-port`, by zmienić; `--http-port 0` wyłącza stronę).
 
-2. Na każdym komputerze uczestnika (pliki `client.py` i `protocol.py` w jednym folderze):
+2. Na każdym komputerze uczestnika (pliki `client.py`, `protocol.py`, `voice.py` i `e2e.py` w jednym folderze):
 
    ```
    python client.py
    ```
 
-   Wpisz nick, adres serwera i port, kliknij **Połącz**. Wiadomość wysyłasz Enterem lub przyciskiem **Wyślij**,
-   a Shift+Enter dodaje nową linię. Nick, adres i port są zapamiętywane w pliku `~/.komunikator.json`.
+   Wpisz nick, adres serwera, port i **hasło pokoju** (to samo u wszystkich), kliknij **Połącz**. Wiadomość wysyłasz Enterem lub przyciskiem **Wyślij**,
+   a Shift+Enter dodaje nową linię. Nick, adres i port są zapamiętywane w pliku `~/.komunikator.json`,
+   a z zaznaczonym **Zapamiętaj** także klucz pokoju (sam klucz, nie hasło; plik jest wtedy czytelny tylko dla Ciebie).
 
    Na macOS uruchamiaj klienta Pythonem z python.org albo z Homebrew (`brew install python-tk`).
    Systemowy `/usr/bin/python3` ma stary Tk 8.5, który wyświetla puste okno.
 
 ## Czat w przeglądarce (iPhone, Android, dowolny komputer)
 
-Serwer od razu udostępnia stronę czatu. W przeglądarce otwórz `http://adres-serwera:8080/`,
-wpisz nick i kliknij **Połącz**. Osoby z przeglądarki i z programu `client.py` są w tym samym czacie
+Serwer od razu udostępnia stronę czatu. W przeglądarce otwórz `https://adres-serwera:8080/`,
+wpisz nick i hasło pokoju i kliknij **Połącz**. Osoby z przeglądarki i z programu `client.py` są w tym samym czacie
 i w tej samej rozmowie głosowej. Nick jest zapamiętywany w przeglądarce. Na iPhonie stronę można dodać
 do ekranu początkowego (Udostępnij → Do ekranu początkowego), wtedy otwiera się jak aplikacja.
 
-Czat tekstowy działa po zwykłym `http://`. **Rozmowa głosowa w przeglądarce wymaga HTTPS**: Safari, Chrome
-i inne przeglądarki dają stronie dostęp do mikrofonu tylko pod adresem `https://` (wyjątkiem jest
-`http://localhost` na tym samym komputerze). Opis włączenia HTTPS jest niżej.
+**Czat w przeglądarce wymaga HTTPS** (od wersji 0.6 także czat tekstowy). Safari, Chrome i inne przeglądarki
+dają stronie szyfrowanie (Web Crypto) i mikrofon tylko pod adresem `https://`. Wyjątkiem jest
+`http://localhost` na tym samym komputerze. Pod zwykłym `http://` strona pokaże, że trzeba przejść na HTTPS.
+Opis włączenia HTTPS jest niżej.
 
 ## Raspberry Pi: serwer z HTTPS
 
@@ -139,8 +145,29 @@ więc nie trzeba niczego dodatkowo przekierowywać na routerze.
   i podaj klientom publiczny adres IP. Zezwól też na ten port w zaporze systemu.
 - Alternatywa bez konfiguracji routera: VPN typu Tailscale/ZeroTier i adres z tej sieci.
 
-Uwaga: ruch programu `client.py` nie jest szyfrowany, a czat nie ma haseł – każdy, kto zna adres, może dołączyć.
-Strona z HTTPS jest szyfrowana między przeglądarką a serwerem.
+Uwaga: każdy, kto zna adres, może się połączyć i zobaczyć nicki osób online. Bez hasła pokoju nie przeczyta jednak
+wiadomości ani nie usłyszy rozmowy (patrz „Szyfrowanie end-to-end”).
+
+## Szyfrowanie end-to-end
+
+Wszyscy uczestnicy wpisują to samo **hasło pokoju**. Program robi z niego klucz (PBKDF2-SHA256, 600 000 iteracji)
+i szyfruje nim każdą wiadomość i każdą ramkę dźwięku (AES-256-GCM), zanim cokolwiek wyśle. Hasło ani klucz
+nie trafiają na serwer. Serwer przekazuje szyfrogram dalej i nie zna treści, tak samo jak każdy, kto podsłuchuje
+ruch na porcie 5050.
+
+- Po połączeniu w czacie pojawia się **kod klucza**, np. `C690-FB58-C27D`. Program `client.py` pokazuje go też
+  w tytule okna, a strona obok nicku. Wszyscy w pokoju muszą mieć ten sam kod. Inny kod oznacza inne hasło:
+  wiadomości tej osoby pokazują się jako „Nie udało się odszyfrować…”.
+- Hasło przekaż uczestnikom inną drogą niż przez ten czat (osobiście, SMS-em).
+- Szyfrowanie wiąże wiadomość z nickiem nadawcy, więc serwer nie może podpisać jej cudzym nickiem.
+  Ktoś, kto zna hasło, może jednak pisać pod dowolnym nickiem, bo hasło jest wspólne dla całego pokoju.
+- Jawne zostają: nicki, lista osób w czacie i w rozmowie, sygnał „… pisze…”, godziny i długości wiadomości.
+- Serwer może powtórzyć starą wiadomość, ale nie może jej zmienić ani odczytać.
+- Strona czatu pochodzi z tego samego serwera. Kto przejmie serwer, może podmienić jej kod i wykraść hasło
+  przy następnym logowaniu. Program `client.py` jest od tego wolny, bo jego kod jest na Twoim komputerze.
+- Nie ma utajniania przekazywania (forward secrecy). Kto pozna hasło i ma nagrany dawny ruch, odczyta go.
+  Hasło warto więc czasem zmieniać, a wtedy wszyscy wpisują nowe.
+- Serwer 0.6 nie wpuszcza starszych klientów (0.5 i wcześniejszych), bo ci wysyłaliby jawny tekst.
 
 ## Co działa
 
@@ -157,6 +184,7 @@ Strona z HTTPS jest szyfrowana między przeglądarką a serwerem.
 - okno „O programie” z wersją i danymi autora (0.4)
 - czat w przeglądarce, także na iPhonie i Androidzie, z rozmową głosową przez HTTPS (0.5)
 - obsługa HTTPS w serwerze i opis instalacji na Raspberry Pi (0.5)
+- szyfrowanie end-to-end wiadomości i rozmowy głosowej wspólnym hasłem pokoju, z kodem klucza do porównania (0.6)
 - poprawne rozłączenie po zamknięciu okna lub zatrzymaniu serwera
 
 ## Autor
