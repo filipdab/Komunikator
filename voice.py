@@ -1,12 +1,12 @@
 """Rozmowa głosowa: nagrywanie z mikrofonu, miksowanie i odtwarzanie rozmówców.
 
 Dźwięk to surowe PCM: 16 kHz, mono, 16 bitów, ramki po 20 ms. Ramki idą przez
-serwer czatu (base64 w JSON), więc nie trzeba otwierać dodatkowych portów.
+serwer czatu (zaszyfrowane, base64 w JSON), więc nie trzeba otwierać dodatkowych portów.
+Szyfrowaniem zajmuje się połączenie (client.ChatConnection); tu są gołe bajty PCM.
 Wymaga biblioteki `sounddevice` (pip install sounddevice).
 """
 
 import array
-import base64
 import collections
 import queue
 import threading
@@ -136,12 +136,8 @@ class VoiceEngine:
         except queue.Full:
             pass
 
-    def receive(self, nick, data):
-        """Ramka od innego rozmówcy (base64)."""
-        try:
-            frame = base64.b64decode(data)
-        except ValueError:
-            return
+    def receive(self, nick, frame):
+        """Ramka PCM od innego rozmówcy (już odszyfrowana)."""
         self.jitter.push(nick, frame)
 
     def _callback(self, indata, outdata, frames, time_info, status):
@@ -165,6 +161,6 @@ class VoiceEngine:
             if frame is None or not self.running:
                 break
             try:
-                self.send_frame(base64.b64encode(frame).decode("ascii"))
+                self.send_frame(frame)
             except OSError:
                 break

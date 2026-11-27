@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.5";
+const APP_VERSION = "0.6";
 const APP_AUTHOR = "Filip Dąbrowski";
 const APP_EMAIL = "filip@dabrowski.in";
 const APP_WEBSITE = "www.dabrowski.in";
@@ -20,6 +20,8 @@ const TYPING_IDLE = 3000;
 const TYPING_EXPIRE = 6000;
 const MIC_SILENT_WARN = 4000;
 const NICK_KEY = "komunikator.nick";
+const ROOM_KEY = "komunikator.key"; // zapamiętany klucz pokoju (nie hasło), tylko na życzenie
+const MAX_TEXT = 2000;
 
 const $ = (id) => document.getElementById(id);
 
@@ -34,6 +36,13 @@ let lastTypingSent = 0;
 let typingIdleTimer = null;
 let unread = 0;
 let voice = null;         // stan rozmowy głosowej, gdy w niej jesteśmy
+let roomKey = E2E.fromHex(localStorage.getItem(ROOM_KEY)); // 32 bajty klucza z hasła pokoju
+let cipher = null;        // szyfr pokoju (E2E.roomCipher)
+let keyAnnounced = false; // komunikat o szyfrowaniu pokazujemy raz, nie po każdym ponownym połączeniu
+const badAudio = new Set(); // od kogo dźwięk się nie odszyfrował (ostrzegamy raz)
+// Odszyfrowanie i szyfrowanie są asynchroniczne: kolejki zachowują kolejność wiadomości i ramek.
+let inbox = Promise.resolve();
+let outbox = Promise.resolve();
 
 // ---------- połączenie ----------
 
@@ -45,15 +54,20 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+// wysyła wiadomość, którą trzeba najpierw zaszyfrować (make zwraca Promise z obiektem)
+function sendEncrypted(make) {
+  outbox = outbox.then(make).then(send).catch((err) => console.error(err));
+}
+
 function connect() {
   clearTimeout(retryTimer);
   const sock = new WebSocket(wsUrl());
   ws = sock;
-  sock.onopen = () => sock.send(JSON.stringify({ type: "join", nick: myNick }));
+  sock.onopen = () => sock.send(JSON.stringify({ type: "join", nick: myNick, e2e: E2E.PROTOCOL }));
   sock.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
-    if (sock === ws) handle(msg);
+    inbox = inbox.then(() => (sock === ws ? handle(msg) : null)).catch((err) => console.error(err));
   };
   sock.onclose = () => {
     if (sock !== ws) return;
@@ -77,14 +91,19 @@ function connect() {
   };
 }
 
-function handle(msg) {
+async function handle(msg) {
   switch (msg.type) {
     case "welcome":
       joined = true;
       retryDelay = 1000;
       myNick = msg.nick;
+      badAudio.clear();
       showChat();
-      setStatus("Połączono jako " + myNick);
+      setStatus(`Połączono jako ${myNick} · 🔒 ${cipher.fingerprint}`);
+      if (!keyAnnounced) {
+        keyAnnounced = true;
+        addSystem(`🔒 Rozmowa jest szyfrowana end-to-end. Kod klucza: ${cipher.fingerprint}. Wszyscy w pokoju muszą mieć ten sam kod.`);
+      }
       if (voice) {
         voice.remote = false;
         send({ type: "voice_join" });
@@ -101,15 +120,23 @@ function handle(msg) {
         ws && ws.close();
       }
       break;
-    case "msg":
+    case "msg": {
       typingUsers.delete(msg.nick);
       renderTyping();
-      addMessage(msg.nick, msg.text, msg.time);
+      let text;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(await cipher.decrypt("msg", msg.nick, msg.data));
+      } catch {
+        addSystem(`Nie udało się odszyfrować wiadomości od ${msg.nick}. Ta osoba ma prawdopodobnie inne hasło pokoju (inny kod klucza).`, msg.time);
+        break;
+      }
+      addMessage(msg.nick, text, msg.time);
       if (document.hidden && msg.nick !== myNick) {
         unread++;
         document.title = `(${unread}) Komunikator`;
       }
       break;
+    }
     case "system":
       addSystem(msg.text, msg.time);
       break;
@@ -126,26 +153,73 @@ function handle(msg) {
       else typingUsers.delete(msg.nick);
       renderTyping();
       break;
-    case "audio":
-      if (voice && voice.playback) playAudio(msg.nick, msg.data);
+    case "audio": {
+      if (!voice || !voice.playback) break;
+      let frame;
+      try {
+        frame = await cipher.decrypt("audio", msg.nick, msg.data);
+      } catch {
+        if (!badAudio.has(msg.nick)) {
+          badAudio.add(msg.nick);
+          addSystem(`Nie udało się odszyfrować głosu od ${msg.nick} (prawdopodobnie inne hasło pokoju).`);
+        }
+        break;
+      }
+      if (voice && voice.playback && frame.byteLength % 2 === 0) {
+        voice.playback.port.postMessage({ nick: msg.nick, frame }, [frame]);
+      }
       break;
+    }
   }
 }
 
 // ---------- ekran logowania ----------
 
 $("nick").value = localStorage.getItem(NICK_KEY) || "";
+$("remember").checked = !!roomKey;
 
-$("login-form").addEventListener("submit", (e) => {
+function updatePassHint() {
+  $("passphrase").placeholder = roomKey ? "bez zmian – zostaw puste" : "";
+}
+updatePassHint();
+
+if (!E2E.available()) {
+  $("connect-btn").disabled = true;
+  $("login-status").textContent = "Rozmowa jest szyfrowana, a szyfrowanie w przeglądarce działa tylko pod adresem https://. " +
+    "Otwórz stronę przez HTTPS (zobacz README).";
+}
+
+$("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const nick = $("nick").value.trim();
-  if (!nick) return;
+  if (!nick || !E2E.available()) return;
+  const pass = $("passphrase").value;
+  if (!pass && !roomKey) {
+    $("login-status").textContent = "Wpisz hasło pokoju – to samo co pozostałe osoby.";
+    $("passphrase").focus();
+    return;
+  }
+  $("connect-btn").disabled = true;
+  $("login-status").textContent = pass ? "Przygotowuję klucz…" : "Łączenie…";
+  try {
+    if (pass) roomKey = await E2E.deriveKey(pass);
+    cipher = await E2E.roomCipher(roomKey);
+  } catch (err) {
+    console.error(err);
+    $("login-status").textContent = "Nie udało się przygotować szyfrowania.";
+    $("connect-btn").disabled = false;
+    return;
+  }
+  $("passphrase").value = "";
+  if ($("remember").checked) localStorage.setItem(ROOM_KEY, E2E.toHex(roomKey));
+  else localStorage.removeItem(ROOM_KEY);
+  updatePassHint();
+  keyAnnounced = false;
+  $("login-status").textContent = "Łączenie…";
   localStorage.setItem(NICK_KEY, nick);
   myNick = nick;
   wantConnected = true;
   retryDelay = 1000;
-  $("connect-btn").disabled = true;
-  $("login-status").textContent = "Łączenie…";
   connect();
 });
 
@@ -244,7 +318,9 @@ function sendMessage() {
   const input = $("input");
   const text = input.value.trim();
   if (!text || !joined) return;
-  send({ type: "msg", text });
+  const c = cipher, nick = myNick;
+  const data = new TextEncoder().encode([...text].slice(0, MAX_TEXT).join(""));
+  sendEncrypted(async () => ({ type: "msg", data: await c.encrypt("msg", nick, data) }));
   input.value = "";
   $("emoji-panel").hidden = true;
   stopTyping();
@@ -335,26 +411,6 @@ for (const b of document.querySelectorAll(".about-btn")) {
 
 // ---------- rozmowa głosowa ----------
 
-function toBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let s = "";
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-  return btoa(s);
-}
-
-function fromBase64(data) {
-  const s = atob(data);
-  const bytes = new Uint8Array(s.length & ~1);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = s.charCodeAt(i);
-  return bytes.buffer;
-}
-
-function playAudio(nick, data) {
-  let frame;
-  try { frame = fromBase64(data); } catch { return; }
-  voice.playback.port.postMessage({ nick, frame }, [frame]);
-}
-
 async function startVoice() {
   if (!window.isSecureContext || !navigator.mediaDevices || !window.AudioWorkletNode) {
     addSystem("Rozmowa głosowa w przeglądarce wymaga połączenia HTTPS (adres https://…). Zobacz README, rozdział o HTTPS.");
@@ -403,7 +459,10 @@ function onMicFrame(state, { frame, peak }) {
     state.warned = true;
     addSystem("Mikrofon nic nie nagrywa. Sprawdź, czy przeglądarka ma dostęp do właściwego mikrofonu.");
   }
-  if (!state.muted && joined) send({ type: "audio", data: toBase64(frame) });
+  if (!state.muted && joined) {
+    const c = cipher, nick = myNick;
+    sendEncrypted(async () => ({ type: "audio", data: await c.encrypt("audio", nick, frame) }));
+  }
 }
 
 function stopVoice(notify = true) {

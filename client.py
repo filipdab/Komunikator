@@ -13,6 +13,7 @@ import threading
 import time
 import webbrowser
 
+import e2e
 import voice
 from protocol import DEFAULT_PORT, LineReader, encode
 
@@ -22,10 +23,12 @@ try:
 except ImportError:  # pozwala używać ChatConnection bez tkintera (np. w testach)
     tk = None
 
-APP_VERSION = "0.5"
+APP_VERSION = "0.6"
 APP_AUTHOR = "Filip Dąbrowski"
 APP_EMAIL = "filip@dabrowski.in"
 APP_WEBSITE = "https://www.dabrowski.in"
+MAX_NICK = 24     # jak w server.py
+MAX_TEXT = 2000   # maks. długość wiadomości w znakach
 
 EMOJI = (
     "😀 😃 😄 😁 😆 😅 😂 🤣 😊 🙂 😉 😍 😘 😎 🤓 🤔 "
@@ -64,11 +67,23 @@ def load_settings():
 
 
 def save_settings(data):
+    # plik może zawierać klucz pokoju, więc tylko dla właściciela
     try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        fd = os.open(SETTINGS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.chmod(SETTINGS_FILE, 0o600)
     except OSError:
         pass
+
+
+def saved_key(settings):
+    """Zapamiętany klucz pokoju (32 bajty) albo None."""
+    try:
+        key = bytes.fromhex(settings.get("key", ""))
+    except (TypeError, ValueError):
+        return None
+    return key if len(key) == 32 else None
 
 
 def typing_text(nicks):
@@ -85,22 +100,29 @@ def typing_text(nicks):
 class ChatConnection:
     """Połączenie z serwerem. Odebrane zdarzenia trafiają do kolejki `events`.
 
-    Każde zdarzenie to słownik z protokołu, a dodatkowo
-    {"type": "disconnected", "text": ...} po zerwaniu połączenia.
-    Ramki dźwięku nie przechodzą przez kolejkę: trafiają od razu do `on_audio(nick, data)`.
+    Wiadomości i dźwięk są szyfrowane end-to-end szyfrem pokoju (e2e.RoomCipher).
+    Każde zdarzenie to słownik z protokołu (wiadomość „msg” już odszyfrowana, z polem „text”),
+    a dodatkowo {"type": "disconnected", "text": ...} po zerwaniu połączenia,
+    {"type": "undecryptable", "nick": ...} dla wiadomości, której nie da się odszyfrować,
+    i {"type": "undecryptable_audio", "nick": ...} raz na osobę dla takiego dźwięku.
+    Ramki dźwięku nie przechodzą przez kolejkę: trafiają od razu do `on_audio(nick, pcm)`.
     """
 
-    def __init__(self):
+    def __init__(self, cipher):
+        self.cipher = cipher
+        self.nick = None  # nick nadawcy w szyfrowanych danych, potwierdzany przez „welcome”
         self.sock = None
         self.events = queue.Queue()
         self.connected = False
         self.on_audio = None
+        self.bad_audio = set()
         self.send_lock = threading.Lock()  # wysyłają wątek okna i wątek dźwięku
 
     def connect(self, host, port, nick, timeout=5):
+        self.nick = nick.strip()[:MAX_NICK]  # serwer skraca nick tak samo
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(None)
-        self.sock.sendall(encode({"type": "join", "nick": nick}))
+        self.sock.sendall(encode({"type": "join", "nick": nick, "e2e": e2e.PROTOCOL}))
         self.connected = True
         threading.Thread(target=self._receive_loop, args=(self.sock,), daemon=True).start()
 
@@ -112,18 +134,42 @@ class ChatConnection:
                 msg = reader.read()
                 if msg is None:
                     break
-                if msg.get("type") == "audio":
+                kind = msg.get("type")
+                if kind == "audio":
                     handler = self.on_audio
                     if handler:
-                        handler(msg.get("nick"), msg.get("data", ""))
+                        self._receive_audio(handler, msg)
                     continue
-                if msg.get("type") == "error":
+                if kind == "welcome":
+                    self.nick = msg.get("nick", self.nick)
+                elif kind == "msg":
+                    msg = self._decrypt_message(msg)
+                elif kind == "error":
                     reason = msg.get("text", reason)
                 self.events.put(msg)
         except (OSError, ValueError):
             pass
         self.connected = False
         self.events.put({"type": "disconnected", "text": reason})
+
+    def _decrypt_message(self, msg):
+        nick = str(msg.get("nick", "?"))
+        try:
+            text = self.cipher.decrypt("msg", nick, msg.get("data", "")).decode("utf-8")
+        except ValueError:  # także UnicodeDecodeError
+            return {"type": "undecryptable", "nick": nick, "time": msg.get("time")}
+        return {"type": "msg", "nick": nick, "text": text, "time": msg.get("time")}
+
+    def _receive_audio(self, handler, msg):
+        nick = str(msg.get("nick", ""))
+        try:
+            frame = self.cipher.decrypt("audio", nick, msg.get("data", ""))
+        except ValueError:
+            if nick not in self.bad_audio:
+                self.bad_audio.add(nick)
+                self.events.put({"type": "undecryptable_audio", "nick": nick})
+            return
+        handler(nick, frame)
 
     def send(self, obj):
         """Wysyła wiadomość protokołu. Rzuca OSError, gdy połączenie padło."""
@@ -134,7 +180,8 @@ class ChatConnection:
             sock.sendall(encode(obj))
 
     def send_message(self, text):
-        self.send({"type": "msg", "text": text})
+        data = self.cipher.encrypt("msg", self.nick, text[:MAX_TEXT].encode("utf-8"))
+        self.send({"type": "msg", "data": data})
 
     def send_typing(self, active):
         try:
@@ -142,8 +189,8 @@ class ChatConnection:
         except OSError:
             pass
 
-    def send_audio(self, data):
-        self.send({"type": "audio", "data": data})
+    def send_audio(self, frame):
+        self.send({"type": "audio", "data": self.cipher.encrypt("audio", self.nick, frame)})
 
     def close(self):
         self.connected = False
@@ -172,10 +219,11 @@ class ChatApp:
         self.typing_idle_job = None
         self.voice = None             # VoiceEngine, gdy jestem w rozmowie głosowej
         settings = load_settings()
+        self.room_key = saved_key(settings)  # klucz pokoju z hasła (w pamięci; na dysku tylko z „Zapamiętaj”)
 
         self.root.title(f"Komunikator {APP_VERSION}")
-        self.root.geometry("760x540")
-        self.root.minsize(640, 380)
+        self.root.geometry("900x560")
+        self.root.minsize(780, 380)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Pasek połączenia (góra)
@@ -193,10 +241,17 @@ class ChatApp:
         self.port_var = tk.StringVar(value=str(settings.get("port", DEFAULT_PORT)))
         self.port_entry = ttk.Entry(top, textvariable=self.port_var, width=6)
         self.port_entry.pack(side=tk.LEFT, padx=(2, 10))
+        ttk.Label(top, text="Hasło pokoju:").pack(side=tk.LEFT)
+        self.pass_var = tk.StringVar()
+        self.pass_entry = ttk.Entry(top, textvariable=self.pass_var, width=12, show="•")
+        self.pass_entry.pack(side=tk.LEFT, padx=2)
+        self.remember_var = tk.BooleanVar(value=self.room_key is not None)
+        self.remember_check = ttk.Checkbutton(top, text="Zapamiętaj", variable=self.remember_var)
+        self.remember_check.pack(side=tk.LEFT, padx=(2, 10))
         self.connect_btn = ttk.Button(top, text="Połącz", width=10, command=self.toggle_connection)
         self.connect_btn.pack(side=tk.LEFT)
         ttk.Button(top, text="O programie", command=self.show_about).pack(side=tk.RIGHT)
-        for entry in (self.nick_entry, self.host_entry, self.port_entry):
+        for entry in (self.nick_entry, self.host_entry, self.port_entry, self.pass_entry):
             entry.bind("<Return>", lambda e: self.toggle_connection())
 
         # Pole wpisywania (dół). Pakowane przed środkiem, żeby zawsze było widoczne.
@@ -263,6 +318,9 @@ class ChatApp:
 
         self.set_connected_ui(False)
         self.nick_entry.focus_set()
+        if self.room_key and e2e.available():
+            self.add_system(f"Hasło pokoju jest zapamiętane (kod klucza {e2e.fingerprint(self.room_key)}). "
+                            "Wpisz nowe hasło, żeby je zmienić.")
         self.root.after(100, self.poll_events)
         self.root.after(1000, self.expire_typing)
 
@@ -285,8 +343,27 @@ class ChatApp:
         except ValueError:
             messagebox.showwarning("Zły port", "Port musi być liczbą.")
             return
-        save_settings({"nick": nick, "host": host, "port": port})
-        self.conn = ChatConnection()
+        if not e2e.available():
+            messagebox.showerror("Brak szyfrowania",
+                                 "Komunikator szyfruje rozmowy i wymaga biblioteki cryptography.\n"
+                                 "Zainstaluj ją poleceniem:\n\n  python3 -m pip install cryptography\n\n"
+                                 "(Raspberry Pi OS, Debian, Ubuntu: sudo apt install python3-cryptography)\n\n"
+                                 f"Szczegóły: {e2e.IMPORT_ERROR}")
+            return
+        passphrase = self.pass_var.get()
+        if passphrase:
+            self.room_key = e2e.derive_key(passphrase)
+            self.pass_var.set("")
+        elif not self.room_key:
+            messagebox.showwarning("Brak hasła", "Wpisz hasło pokoju.\n\nWszyscy uczestnicy muszą wpisać to samo "
+                                   "hasło. Serwer go nie zna i nie może odczytać rozmowy.")
+            return
+        settings = {"nick": nick, "host": host, "port": port}
+        if self.remember_var.get():
+            settings["key"] = self.room_key.hex()
+        save_settings(settings)
+        cipher = e2e.RoomCipher(self.room_key)
+        self.conn = ChatConnection(cipher)
         try:
             self.conn.connect(host, port, nick)
         except OSError as e:
@@ -294,6 +371,7 @@ class ChatApp:
             messagebox.showerror("Błąd połączenia", f"Nie udało się połączyć z {host}:{port}\n{e}")
             return
         self.set_connected_ui(True)
+        self.root.title(f"Komunikator {APP_VERSION} – klucz {cipher.fingerprint}")
         self.add_system(f"Łączenie z {host}:{port}...")
 
     def disconnect(self):
@@ -303,7 +381,7 @@ class ChatApp:
 
     def set_connected_ui(self, connected):
         entry_state = tk.DISABLED if connected else tk.NORMAL
-        for w in (self.nick_entry, self.host_entry, self.port_entry):
+        for w in (self.nick_entry, self.host_entry, self.port_entry, self.pass_entry, self.remember_check):
             w.config(state=entry_state)
         self.connect_btn.config(text="Rozłącz" if connected else "Połącz")
         self.input.config(state=tk.NORMAL if connected else tk.DISABLED,
@@ -319,6 +397,7 @@ class ChatApp:
             self.voice_list.delete(0, tk.END)
             self.typing_users.clear()
             self.update_typing_label()
+            self.root.title(f"Komunikator {APP_VERSION}")
 
     # --- wysyłanie i sygnał pisania ---
 
@@ -383,11 +462,19 @@ class ChatApp:
         if kind == "welcome":
             self.my_nick = event.get("nick")
             self.add_system(f"Połączono jako {self.my_nick}.")
+            self.add_system(f"🔒 Rozmowa jest szyfrowana end-to-end. Kod klucza: {self.conn.cipher.fingerprint}. "
+                            "Wszyscy w pokoju muszą mieć ten sam kod.")
         elif kind == "msg":
             nick = event.get("nick", "?")
             self.typing_users.pop(nick, None)
             self.update_typing_label()
             self.add_message(nick, event.get("text", ""), event.get("time"))
+        elif kind == "undecryptable":
+            self.add_system(f"Nie udało się odszyfrować wiadomości od {event.get('nick')}. "
+                            "Ta osoba ma prawdopodobnie inne hasło pokoju (inny kod klucza).", event.get("time"))
+        elif kind == "undecryptable_audio":
+            self.add_system(f"Nie udało się odszyfrować głosu od {event.get('nick')} "
+                            "(prawdopodobnie inne hasło pokoju).")
         elif kind == "typing":
             nick = event.get("nick")
             if nick and nick != self.my_nick:
